@@ -1,5 +1,5 @@
 const https = require("https");
-const { SYSTEM_PROMPT } = require("../prompts/analyzePrompt");
+const { buildFoodAnalysisPrompt, normalizeResponse } = require("../prompts/analyzePrompt");
 
 const TEXT_MODEL = "llama-3.3-70b-versatile";
 const VISION_MODEL = "llama-3.2-11b-vision-preview";
@@ -23,11 +23,8 @@ function post(payload) {
         let raw = "";
         res.on("data", (c) => (raw += c));
         res.on("end", () => {
-          try {
-            resolve(JSON.parse(raw));
-          } catch {
-            reject(new Error("Invalid JSON from Groq: " + raw.slice(0, 200)));
-          }
+          try { resolve(JSON.parse(raw)); }
+          catch { reject(new Error("Invalid JSON from Groq: " + raw.slice(0, 200))); }
         });
       }
     );
@@ -39,19 +36,23 @@ function post(payload) {
 }
 
 function buildMessages({ text, imageBase64 }) {
+  const systemPrompt = buildFoodAnalysisPrompt({ hasImage: !!imageBase64 });
+
   if (imageBase64) {
+    // Vision models don't support a separate system role — embed prompt in user content
     return [
       {
         role: "user",
         content: [
-          { type: "text", text: SYSTEM_PROMPT + (text ? `\n\nUser input: ${text}` : "") },
+          { type: "text", text: systemPrompt + (text ? `\n\nAdditional context: ${text}` : "") },
           { type: "image_url", image_url: { url: `data:image/jpeg;base64,${imageBase64}` } },
         ],
       },
     ];
   }
+
   return [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt },
     { role: "user", content: text },
   ];
 }
@@ -70,13 +71,16 @@ async function analyze({ text, imageBase64 }) {
     model,
     messages: buildMessages({ text, imageBase64 }),
     temperature: 0.2,
-    max_tokens: 256,
+    max_tokens: 512,
+    // json_object mode is not supported on vision models
     ...(imageBase64 ? {} : { response_format: { type: "json_object" } }),
   };
 
   const data = await post(payload);
   if (data.error) throw new Error(`Groq API error: ${data.error.message}`);
-  return extractJson(data.choices[0].message.content);
+
+  const raw = extractJson(data.choices[0].message.content);
+  return normalizeResponse(raw);
 }
 
 module.exports = { analyze };
