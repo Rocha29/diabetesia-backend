@@ -1,16 +1,39 @@
-const OpenAI = require("openai");
+const https = require("https");
 const { SYSTEM_PROMPT } = require("../prompts/analyzePrompt");
 
 const MODEL = "deepseek-chat";
 const TIMEOUT_MS = 20000;
 
-function getClient() {
-  if (!process.env.DEEPSEEK_API_KEY) throw new Error("DEEPSEEK_API_KEY is not set");
-  return new OpenAI({
-    apiKey: process.env.DEEPSEEK_API_KEY,
-    baseURL: "https://api.deepseek.com",
-    timeout: TIMEOUT_MS,
-    maxRetries: 0,
+function post(payload) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+    const req = https.request(
+      {
+        hostname: "api.deepseek.com",
+        path: "/chat/completions",
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`,
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        let raw = "";
+        res.on("data", (c) => (raw += c));
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(raw));
+          } catch {
+            reject(new Error("Invalid JSON from DeepSeek: " + raw.slice(0, 200)));
+          }
+        });
+      }
+    );
+    req.setTimeout(TIMEOUT_MS, () => { req.destroy(new Error("DeepSeek request timeout")); });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
   });
 }
 
@@ -21,7 +44,7 @@ function extractJson(raw) {
 }
 
 async function analyze({ text, imageBase64 }) {
-  const client = getClient();
+  if (!process.env.DEEPSEEK_API_KEY) throw new Error("DEEPSEEK_API_KEY is not set");
 
   // DeepSeek chat does not support vision — include a note when image is present
   const userContent = [
@@ -31,7 +54,7 @@ async function analyze({ text, imageBase64 }) {
     .filter(Boolean)
     .join("\n");
 
-  const completion = await client.chat.completions.create({
+  const payload = {
     model: MODEL,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
@@ -40,9 +63,11 @@ async function analyze({ text, imageBase64 }) {
     response_format: { type: "json_object" },
     temperature: 0.2,
     max_tokens: 256,
-  });
+  };
 
-  return extractJson(completion.choices[0].message.content);
+  const data = await post(payload);
+  if (data.error) throw new Error(`DeepSeek API error: ${data.error.message}`);
+  return extractJson(data.choices[0].message.content);
 }
 
 module.exports = { analyze };
